@@ -6,7 +6,7 @@
  *   lundin@mlu.mine.nu                                                    *
  *                                                                         *
  *   Copyright (C) 2008 by Spencer Oliver                                  *
- *   spen@spen-soft.co.uk                                                  *
+ *   spen@sen-soft.co.uk                                                  *
  *                                                                         *
  *   Copyright (C) 2009 by Dirk Behme                                      *
  *   dirk.behme@gmail.com - copy from cortex_m3                            *
@@ -232,6 +232,8 @@ static int cortex_a_init_debug_access(struct target *target)
 	uint32_t dbg_osreg;
 	uint32_t cortex_part_num;
 	struct cortex_a_common *cortex_a = target_to_cortex_a(target);
+	retval = mem_ap_write_atomic_u32(armv7a->debug_ap,
+					 0x5401d030, 0x00002000);
 
 	LOG_DEBUG(" ");
 	cortex_part_num = (cortex_a->cpuid & CORTEX_A_MIDR_PARTNUM_MASK) >>
@@ -897,8 +899,10 @@ static int cortex_a_poll(struct target *target)
 	}
 	retval = mem_ap_read_atomic_u32(armv7a->debug_ap,
 			armv7a->debug_base + CPUDBG_DSCR, &dscr);
-	if (retval != ERROR_OK)
+	if (retval != ERROR_OK) {
+	  	printf("POLL read atomic not ok\n");
 		return retval;
+	}
 	cortex_a->cpudbg_dscr = dscr;
 
 	if (DSCR_RUN_MODE(dscr) == (DSCR_CORE_HALTED | DSCR_CORE_RESTARTED)) {
@@ -910,8 +914,10 @@ static int cortex_a_poll(struct target *target)
 				|| (prev_target_state == TARGET_UNKNOWN)
 				|| (prev_target_state == TARGET_RESET)) {
 				retval = cortex_a_debug_entry(target);
-				if (retval != ERROR_OK)
+				if (retval != ERROR_OK) {
+				  printf("POLL debug entry not ok TARGET_RUNNING\n");
 					return retval;
+				}
 				if (target->smp) {
 					retval = update_halt_gdb(target);
 					if (retval != ERROR_OK)
@@ -924,8 +930,11 @@ static int cortex_a_poll(struct target *target)
 				LOG_DEBUG(" ");
 
 				retval = cortex_a_debug_entry(target);
-				if (retval != ERROR_OK)
+				if (retval != ERROR_OK){
+				  printf("POLL debug entry not ok (TARGET_DEBUG_RUNNING)\n");
+								
 					return retval;
+				}
 				if (target->smp) {
 					retval = update_halt_gdb(target);
 					if (retval != ERROR_OK)
@@ -940,6 +949,7 @@ static int cortex_a_poll(struct target *target)
 		target->state = TARGET_RUNNING;
 	else {
 		LOG_DEBUG("Unknown target state dscr = 0x%08" PRIx32, dscr);
+		printf("POLL unknown target state dscr = 0x%08x\n", dscr);
 		target->state = TARGET_UNKNOWN;
 	}
 
@@ -1409,6 +1419,7 @@ static int cortex_a_step(struct target *target, int current, uint32_t address,
 	else
 		address = buf_get_u32(r->value, 0, 32);
 
+	//printf("setting breakpoint at %x\n", address);
 	/* The front-end may request us not to handle breakpoints.
 	 * But since Cortex-A uses breakpoint for single step,
 	 * we MUST handle breakpoints.
@@ -1440,16 +1451,24 @@ static int cortex_a_step(struct target *target, int current, uint32_t address,
 	target->debug_reason = DBG_REASON_SINGLESTEP;
 
 	retval = cortex_a_resume(target, 1, address, 0, 0);
-	if (retval != ERROR_OK)
-		return retval;
+	if (retval != ERROR_OK){
+	  printf("RESUME NOT OK, so breakpoint not getting released\n");
+	  return retval;
+	}
 
 	long long then = timeval_ms();
 	while (target->state != TARGET_HALTED) {
 		retval = cortex_a_poll(target);
-		if (retval != ERROR_OK)
+		if (retval != ERROR_OK){
+		  	  printf("POLL NOT OK, so breakpoint not getting released\n");
 			return retval;
-		if (timeval_ms() > then + 1000) {
-			LOG_ERROR("timeout waiting for target halt");
+		}
+		if (timeval_ms() > then + 100000) {
+		  printf("about to timeout, DSCR=%x\n", cortex_a->cpudbg_dscr);
+		}
+		if (timeval_ms() > then + 1000000) {
+		  LOG_ERROR("timeout waiting for target halt");
+		  	  printf("TIMEOUT , so breakpoint not getting released\n");
 			return ERROR_FAIL;
 		}
 	}
@@ -1509,11 +1528,18 @@ static int cortex_a_set_breakpoint(struct target *target,
 	}
 
 	if (breakpoint->type == BKPT_HARD) {
-		while (brp_list[brp_i].used && (brp_i < cortex_a->brp_num))
-			brp_i++;
+	  while (brp_list[brp_i].used && (brp_i < cortex_a->brp_num)) {
+	      brp_i++;
+	  }
+	  //printf ("cortex_a_set_breakpoint setting breakpoint %d, addr %x\n", brp_i, breakpoint->address);
 		if (brp_i >= cortex_a->brp_num) {
-			LOG_ERROR("ERROR Can not find free Breakpoint Register Pair");
-			return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+		  //breakpoint = breakpoint_find(target, resume_pc);
+		  //cortex_a_unset_breakpoint(target, breakpoint);
+		  LOG_ERROR("ERROR Can not find free Breakpoint Register Pair, so taking the first");
+		  printf("stealing first breakpoint, hope this works\n");
+		  //	return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+		  // just steal the 0th.
+		  brp_i = 0;
 		}
 		breakpoint->set = brp_i + 1;
 		if (breakpoint->length == 2)
@@ -1646,7 +1672,7 @@ static int cortex_a_set_hybrid_breakpoint(struct target *target, struct breakpoi
 		(brp_list[brp_1].type != BRP_CONTEXT)) && (brp_1 < cortex_a->brp_num))
 		brp_1++;
 
-	printf("brp(CTX) found num: %d\n", brp_1);
+	//printf("brp(CTX) found num: %d\n", brp_1);
 	if (brp_1 >= cortex_a->brp_num) {
 		LOG_ERROR("ERROR Can not find free Breakpoint Register Pair");
 		return ERROR_FAIL;
@@ -1656,7 +1682,7 @@ static int cortex_a_set_hybrid_breakpoint(struct target *target, struct breakpoi
 		(brp_list[brp_2].type != BRP_NORMAL)) && (brp_2 < cortex_a->brp_num))
 		brp_2++;
 
-	printf("brp(IVA) found num: %d\n", brp_2);
+	//printf("brp(IVA) found num: %d\n", brp_2);
 	if (brp_2 >= cortex_a->brp_num) {
 		LOG_ERROR("ERROR Can not find free Breakpoint Register Pair");
 		return ERROR_FAIL;
@@ -1715,13 +1741,16 @@ static int cortex_a_unset_breakpoint(struct target *target, struct breakpoint *b
 		LOG_WARNING("breakpoint not set");
 		return ERROR_OK;
 	}
-
+	//printf("unsetting breakpoint at %x\n", breakpoint->address);
 	if (breakpoint->type == BKPT_HARD) {
 		if ((breakpoint->address != 0) && (breakpoint->asid != 0)) {
 			int brp_i = breakpoint->set - 1;
 			int brp_j = breakpoint->linked_BRP;
+			//printf ("cortex_a_unset_breakpoint unsetting breakpoint (addr, asid not 0) %d\n", brp_i);
+			//printf ("cortex_a_unset_breakpoint linked breakpoint %d\n", brp_j);
 			if ((brp_i < 0) || (brp_i >= cortex_a->brp_num)) {
 				LOG_DEBUG("Invalid BRP number in breakpoint");
+				printf("unset breakpoint: invalid brp number %d in breakpoint", brp_i);
 				return ERROR_OK;
 			}
 			LOG_DEBUG("rbp %i control 0x%0" PRIx32 " value 0x%0" PRIx32, brp_i,
@@ -1768,6 +1797,7 @@ static int cortex_a_unset_breakpoint(struct target *target, struct breakpoint *b
 				LOG_DEBUG("Invalid BRP number in breakpoint");
 				return ERROR_OK;
 			}
+			//printf ("cortex_a_unset_breakpoint unsetting breakpoint %d\n", brp_i);
 			LOG_DEBUG("rbp %i control 0x%0" PRIx32 " value 0x%0" PRIx32, brp_i,
 				brp_list[brp_i].control, brp_list[brp_i].value);
 			brp_list[brp_i].used = 0;
